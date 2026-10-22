@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Privileged-permission allowlist hook for the SYSTEM-PRIVILEGED deployment role
+  (SPEC §1 "Dual purpose", §9). This file is NOT used by a normal APK install;
+  it is consumed only when the app is placed in `priv-app` on an XNet /
+  GrapheneOS-derived OS build, where it must be installed to:
+
+    /system/etc/permissions/   (or /product|/vendor etc/permissions/)
+
+  alongside platform-signing the APK and adding it to the privileged allowlist.
+  The app detects the privileged role at runtime (DeploymentRole) and lifts its
+  boot-start / background behaviour accordingly; the normal-app role does not
+  depend on any of this.
+
+  v0.1 declares no signature/privileged permissions beyond the normal set, so
+  the allowlist is intentionally empty of grants — it exists as the documented
+  seam (§9) to extend without a repo restructure.
+-->
+<permissions>
+    <privapp-permissions package="org.xnet.switchmcp">
+        <!-- Example privileged grants would go here on a custom OS, e.g.:
+        <permission name="android.permission.START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
+        -->
+    </privapp-permissions>
+</permissions>
