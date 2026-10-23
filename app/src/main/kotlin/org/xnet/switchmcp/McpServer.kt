@@ -19,7 +19,7 @@ import kotlinx.serialization.json.putJsonObject
  */
 fun buildSwitchMcpServer(controller: PortmuxController): Server {
     val server = Server(
-        Implementation(name = "switch-mcp", version = "0.2.0"),
+        Implementation(name = "switch-mcp", version = "0.3.0"),
         ServerOptions(
             capabilities = ServerCapabilities(
                 tools = ServerCapabilities.Tools(listChanged = true),
@@ -30,6 +30,42 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
     fun ok(text: String) = CallToolResult(content = listOf(TextContent(text)))
     fun err(text: String) =
         CallToolResult(content = listOf(TextContent("error: $text")), isError = true)
+
+    // Parse the shared egress/transport args. egress: "none"|"default" (default),
+    // "source" (egress_arg = local source IP), or a transport name
+    // "wifi"|"cellular"|"ethernet" (NETWORK pin to that Android Network, no root).
+    // Returns Triple(mode, arg, transport).
+    fun parseEgress(a: Map<String, kotlinx.serialization.json.JsonElement>):
+        Triple<EgressMode, String, NetTransport> {
+        val egress = a["egress"]?.jsonPrimitive?.content?.lowercase()?.trim()
+        val egressArg = a["egress_arg"]?.jsonPrimitive?.content ?: ""
+        return when (egress) {
+            null, "", "none", "default" -> Triple(EgressMode.NONE, "", NetTransport.ANY)
+            "source", "src" -> Triple(EgressMode.SOURCE, egressArg, NetTransport.ANY)
+            "wifi" -> Triple(EgressMode.NETWORK, "", NetTransport.WIFI)
+            "cellular", "cell", "mobile" -> Triple(EgressMode.NETWORK, "", NetTransport.CELLULAR)
+            "ethernet", "eth" -> Triple(EgressMode.NETWORK, "", NetTransport.ETHERNET)
+            else -> error("egress must be one of: none|source|wifi|cellular|ethernet")
+        }
+    }
+
+    // Shared schema fragment for the egress/transport args.
+    fun putEgressProps(b: kotlinx.serialization.json.JsonObjectBuilder) {
+        b.putJsonObject("egress") {
+            put("type", "string")
+            put(
+                "description",
+                "upstream egress: none (default route) | source (bind local IP " +
+                    "via egress_arg) | wifi | cellular | ethernet (no-root pin " +
+                    "the upstream to that Android network; survives handoffs, " +
+                    "fails closed if the network is gone)",
+            )
+        }
+        b.putJsonObject("egress_arg") {
+            put("type", "string")
+            put("description", "for egress=source: the local source IP to bind")
+        }
+    }
 
     // --- add_route ---
     server.addTool(
@@ -56,6 +92,7 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
                 putJsonObject("target_port") {
                     put("type", "integer"); put("description", "target port to forward to")
                 }
+                putEgressProps(this)
             },
             required = listOf("proto", "listen_port", "target_port"),
         ),
@@ -67,12 +104,16 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
                 "tcp", null -> Proto.TCP
                 else -> error("proto must be tcp or udp")
             }
+            val (egress, egressArg, transport) = parseEgress(a)
             val route = controller.addRoute(
                 proto = proto,
                 listenAddr = a["listen_addr"]?.jsonPrimitive?.content ?: "127.0.0.1",
                 listenPort = a["listen_port"]!!.jsonPrimitive.content.toInt(),
                 targetAddr = a["target_addr"]?.jsonPrimitive?.content ?: "127.0.0.1",
                 targetPort = a["target_port"]!!.jsonPrimitive.content.toInt(),
+                egress = egress,
+                egressArg = egressArg,
+                transport = transport,
             )
             ok("added route ${route.id}: ${route.summary()}")
         } catch (t: Throwable) {
@@ -88,8 +129,11 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
             "ARBITRARY destinations chosen per-connection by the client, so it " +
             "implies arbitrary egress and REQUIRES the server to have been " +
             "started with ALLOW_ANY_TARGET (otherwise it is rejected). Binds " +
-            "loopback by default; do not bind below port 1024. If forwarding is " +
-            "running, the listener takes effect immediately.",
+            "loopback by default; do not bind below port 1024. The optional " +
+            "egress arg pins every upstream connection to a chosen network " +
+            "(wifi|cellular|ethernet) with no root — e.g. a SOCKS proxy whose " +
+            "traffic egresses over cellular. If forwarding is running, the " +
+            "listener takes effect immediately.",
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 putJsonObject("listen_addr") {
@@ -98,15 +142,20 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
                 putJsonObject("listen_port") {
                     put("type", "integer"); put("description", "local port to listen on (e.g. 1080)")
                 }
+                putEgressProps(this)
             },
             required = listOf("listen_port"),
         ),
     ) { request ->
         try {
             val a = request.arguments ?: error("missing arguments")
+            val (egress, egressArg, transport) = parseEgress(a)
             val route = controller.addSocks(
                 listenAddr = a["listen_addr"]?.jsonPrimitive?.content ?: "127.0.0.1",
                 listenPort = a["listen_port"]!!.jsonPrimitive.content.toInt(),
+                egress = egress,
+                egressArg = egressArg,
+                transport = transport,
             )
             ok("added socks ${route.id}: ${route.summary()}")
         } catch (t: Throwable) {

@@ -19,7 +19,8 @@ class PortmuxController(
     private val context: Context,
     val allowAnyTarget: Boolean = false,
 ) {
-    private val engine: PortmuxEngine = NativePortmuxEngine(allowNonLoopbackTargets = allowAnyTarget)
+    private val engine: PortmuxEngine =
+        NativePortmuxEngine(context = context, allowNonLoopbackTargets = allowAnyTarget)
     private val networkGuard = NetworkGuard(context)
     val role: DeploymentRole = DeploymentRole.detect(context)
 
@@ -45,6 +46,9 @@ class PortmuxController(
         listenPort: Int,
         targetAddr: String,
         targetPort: Int,
+        egress: EgressMode = EgressMode.NONE,
+        egressArg: String = "",
+        transport: NetTransport = NetTransport.ANY,
     ): Route {
         val target = targetAddr.ifBlank { "127.0.0.1" }
         if (!isLoopback(target)) {
@@ -59,7 +63,9 @@ class PortmuxController(
                 )
             }
         }
-        return engine.addRoute(proto, listenAddr, listenPort, target, targetPort)
+        return engine.addRoute(
+            proto, listenAddr, listenPort, target, targetPort, egress, egressArg, transport,
+        )
     }
 
     /**
@@ -67,10 +73,19 @@ class PortmuxController(
      * supplied per-connection by the client, which is equivalent to permitting
      * arbitrary (including non-loopback) egress. It is therefore gated behind
      * [allowAnyTarget] and MUST NOT be enabled otherwise.
+     *
+     * [egress] optionally pins the proxy's upstream per connection: NONE
+     * (default route), SOURCE (bind a local IP), or NETWORK (no-root pin to a
+     * Wi-Fi/cellular/ethernet Android Network) — the "SOCKS over cellular/wifi"
+     * capability. NETWORK/LAN targets require ACCESS_LOCAL_NETWORK where
+     * applicable (C3) but pinning to a validated INTERNET network does not.
      */
     fun addSocks(
         listenAddr: String,
         listenPort: Int,
+        egress: EgressMode = EgressMode.NONE,
+        egressArg: String = "",
+        transport: NetTransport = NetTransport.ANY,
     ): Route {
         if (!allowAnyTarget) {
             throw IllegalStateException(
@@ -78,7 +93,7 @@ class PortmuxController(
                     "ALLOW_ANY_TARGET to enable it",
             )
         }
-        return engine.addSocks(listenAddr, listenPort)
+        return engine.addSocks(listenAddr, listenPort, egress, egressArg, transport)
     }
 
     fun removeRoute(id: String): Boolean = engine.removeRoute(id)
