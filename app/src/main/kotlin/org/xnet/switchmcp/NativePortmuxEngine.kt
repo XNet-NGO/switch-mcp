@@ -1,5 +1,6 @@
 package org.xnet.switchmcp
 
+import android.content.Context
 import android.util.Log
 import java.util.UUID
 import java.util.concurrent.locks.ReentrantLock
@@ -14,12 +15,18 @@ import kotlin.concurrent.withLock
  * while running tears down the native instance and re-runs on a fresh worker
  * thread with the updated route set.
  *
- * @param allowNonLoopbackTargets off by default (loopback-only), the §12 safety
- *   gate. When enabled, non-loopback targets are permitted (and the app must
- *   hold ACCESS_LOCAL_NETWORK for LAN targets, per C3 — enforced at the Android
- *   layer in [PortmuxController]).
+ * Egress: NONE (default/loopback), SOURCE (bind local IP), and NETWORK (no-root
+ * pin to a Wi-Fi/cellular/ethernet Android Network via android_setsocknetwork).
+ * NETWORK routes request the transport via [NetworkRequester] and push live
+ * handle updates into the native CALLBACK context, so a long-lived SOCKS proxy
+ * survives a network handoff (and fails closed when the network is gone).
+ *
+ * @param context application context (for NetworkRequester). May be null in
+ *   tests that only use NONE/SOURCE egress.
+ * @param allowNonLoopbackTargets off by default (loopback-only), the §12 gate.
  */
 class NativePortmuxEngine(
+    private val context: Context? = null,
     private val allowNonLoopbackTargets: Boolean = false,
 ) : PortmuxEngine {
 
@@ -27,6 +34,7 @@ class NativePortmuxEngine(
     private val routes = LinkedHashMap<String, Route>()
     private var handle: Long = 0L
     private var worker: Thread? = null
+    private var requester: NetworkRequester? = null
 
     override fun addRoute(
         proto: Proto,
@@ -34,6 +42,9 @@ class NativePortmuxEngine(
         listenPort: Int,
         targetAddr: String,
         targetPort: Int,
+        egress: EgressMode,
+        egressArg: String,
+        transport: NetTransport,
     ): Route = lock.withLock {
         require(listenPort in 1..65535) { "listen port $listenPort out of range" }
         require(targetPort in 1..65535) { "target port $targetPort out of range" }
@@ -43,6 +54,7 @@ class NativePortmuxEngine(
                 "target '$target' is not loopback; enable ALLOW_ANY_TARGET to permit non-loopback targets",
             )
         }
+        validateEgress(egress, egressArg)
         val route = Route(
             id = UUID.randomUUID().toString().take(8),
             proto = proto,
@@ -50,6 +62,9 @@ class NativePortmuxEngine(
             listenPort = listenPort,
             targetAddr = target,
             targetPort = targetPort,
+            egress = egress,
+            egressArg = egressArg,
+            transport = transport,
         )
         routes[route.id] = route
         if (worker != null) respawn()
@@ -59,11 +74,12 @@ class NativePortmuxEngine(
     override fun addSocks(
         listenAddr: String,
         listenPort: Int,
+        egress: EgressMode,
+        egressArg: String,
+        transport: NetTransport,
     ): Route = lock.withLock {
         require(listenPort in 1..65535) { "listen port $listenPort out of range" }
-        // A SOCKS proxy dials arbitrary per-connection targets; the target
-        // safety gate therefore cannot apply here and is enforced upstream in
-        // PortmuxController (requires allowAnyTarget).
+        validateEgress(egress, egressArg)
         val route = Route(
             id = UUID.randomUUID().toString().take(8),
             proto = Proto.TCP,
@@ -72,6 +88,9 @@ class NativePortmuxEngine(
             targetAddr = "",
             targetPort = 0,
             isSocks = true,
+            egress = egress,
+            egressArg = egressArg,
+            transport = transport,
         )
         routes[route.id] = route
         if (worker != null) respawn()
@@ -104,24 +123,65 @@ class NativePortmuxEngine(
 
     // --- internals (lock held) ---
 
+    private fun validateEgress(egress: EgressMode, egressArg: String) {
+        if (egress == EgressMode.SOURCE && egressArg.isBlank()) {
+            throw IllegalArgumentException("SOURCE egress requires a source IP (egressArg)")
+        }
+        if (egress == EgressMode.NETWORK && context == null) {
+            throw IllegalStateException("NETWORK egress requires a Context")
+        }
+    }
+
+    private fun egressKind(egress: EgressMode): Int = when (egress) {
+        EgressMode.NONE -> EGRESS_NONE
+        EgressMode.SOURCE -> EGRESS_SOURCE
+        EgressMode.NETWORK -> EGRESS_CALLBACK
+    }
+
+    /** Token grouping CALLBACK routes by transport; > 0 means "pinned". */
+    private fun tokenFor(transport: NetTransport): Int = transport.ordinal + 1
+
     private fun respawn() {
         stopLocked()
         val h = nativeNew()
         if (h == 0L) throw IllegalStateException("portmux_new failed")
         handle = h
+
+        // Set up (or reuse) the network requester and wire live handle updates
+        // into the native CALLBACK contexts before adding NETWORK routes.
+        val needsNetwork = routes.values.any { it.egress == EgressMode.NETWORK }
+        if (needsNetwork && requester == null) {
+            val ctx = context ?: throw IllegalStateException("NETWORK egress requires a Context")
+            requester = NetworkRequester(ctx).also { r ->
+                r.onHandleChanged = { transport, handleValue ->
+                    nativeUpdateNetworkHandle(tokenFor(transport), handleValue)
+                }
+            }
+        }
+
         routes.values.forEach { r ->
+            val kind = egressKind(r.egress)
+            val netHandle: Long
+            val token: Int
+            if (r.egress == EgressMode.NETWORK) {
+                netHandle = requester!!.resolveHandle(r.transport)
+                token = tokenFor(r.transport)
+            } else {
+                netHandle = 0L
+                token = 0
+            }
             val rc = if (r.isSocks) {
-                nativeAddSocks(h, r.listenAddr, r.listenPort, EGRESS_NONE, "")
+                nativeAddSocks(h, r.listenAddr, r.listenPort, kind, r.egressArg, netHandle, token)
             } else {
                 val proto = if (r.proto == Proto.TCP) 0 else 1
                 nativeAddRoute(
                     h, proto, r.listenAddr, r.listenPort,
-                    r.targetAddr, r.targetPort, EGRESS_NONE, "",
+                    r.targetAddr, r.targetPort, kind, r.egressArg, netHandle, token,
                 )
             }
             if (rc != 0) {
                 nativeDestroy(h); handle = 0L
-                throw IllegalStateException("add_route failed for ${r.summary()}")
+                throw IllegalStateException("add failed for ${r.summary()}")
             }
         }
         val t = thread(name = "portmux-run", isDaemon = true) {
@@ -142,6 +202,8 @@ class NativePortmuxEngine(
             handle = 0L
         }
         worker = null
+        requester?.releaseAll()
+        requester = null
     }
 
     private fun isLoopback(addr: String): Boolean =
@@ -155,12 +217,15 @@ class NativePortmuxEngine(
         listenAddr: String, listenPort: Int,
         targetAddr: String, targetPort: Int,
         egressKind: Int, egressArg: String,
+        networkHandle: Long, token: Int,
     ): Int
     private external fun nativeAddSocks(
         handle: Long,
         listenAddr: String, listenPort: Int,
         egressKind: Int, egressArg: String,
+        networkHandle: Long, token: Int,
     ): Int
+    private external fun nativeUpdateNetworkHandle(token: Int, netHandle: Long)
     private external fun nativeRun(handle: Long)
     private external fun nativeStop(handle: Long)
     private external fun nativeDestroy(handle: Long)
@@ -168,10 +233,11 @@ class NativePortmuxEngine(
     companion object {
         private const val TAG = "switch-mcp"
 
-        // Egress kinds mirrored from portmux.h (v0.1 uses NONE only).
+        // Egress kinds mirrored from portmux.h.
         const val EGRESS_NONE = 0
         const val EGRESS_SOURCE = 1
         const val EGRESS_DEVICE = 2
+        const val EGRESS_CALLBACK = 3
 
         init {
             System.loadLibrary("switchmcp")

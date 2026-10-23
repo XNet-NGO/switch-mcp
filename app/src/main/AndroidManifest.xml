@@ -6,6 +6,9 @@
          and is user-revocable on GrapheneOS (C2). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Required to requestNetwork() and pin a socket to a non-default network
+         (NETWORK egress: forward/SOCKS over a chosen Wi-Fi/cellular network). -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <!-- Runtime; only exercised for non-loopback (LAN) targets (C3). -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
