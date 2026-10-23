@@ -19,7 +19,7 @@ import kotlinx.serialization.json.putJsonObject
  */
 fun buildSwitchMcpServer(controller: PortmuxController): Server {
     val server = Server(
-        Implementation(name = "switch-mcp", version = "0.1.0"),
+        Implementation(name = "switch-mcp", version = "0.2.0"),
         ServerOptions(
             capabilities = ServerCapabilities(
                 tools = ServerCapabilities.Tools(listChanged = true),
@@ -80,6 +80,40 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
         }
     }
 
+    // --- add_socks ---
+    server.addTool(
+        name = "add_socks",
+        description = "Add a SOCKS5 proxy listener (RFC1928 no-auth, CONNECT and " +
+            "UDP ASSOCIATE). WARNING: this creates an OPEN PROXY that dials " +
+            "ARBITRARY destinations chosen per-connection by the client, so it " +
+            "implies arbitrary egress and REQUIRES the server to have been " +
+            "started with ALLOW_ANY_TARGET (otherwise it is rejected). Binds " +
+            "loopback by default; do not bind below port 1024. If forwarding is " +
+            "running, the listener takes effect immediately.",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                putJsonObject("listen_addr") {
+                    put("type", "string"); put("description", "listen address (default 127.0.0.1)")
+                }
+                putJsonObject("listen_port") {
+                    put("type", "integer"); put("description", "local port to listen on (e.g. 1080)")
+                }
+            },
+            required = listOf("listen_port"),
+        ),
+    ) { request ->
+        try {
+            val a = request.arguments ?: error("missing arguments")
+            val route = controller.addSocks(
+                listenAddr = a["listen_addr"]?.jsonPrimitive?.content ?: "127.0.0.1",
+                listenPort = a["listen_port"]!!.jsonPrimitive.content.toInt(),
+            )
+            ok("added socks ${route.id}: ${route.summary()}")
+        } catch (t: Throwable) {
+            err(t.message ?: t.toString())
+        }
+    }
+
     // --- remove_route ---
     server.addTool(
         name = "remove_route",
@@ -115,7 +149,9 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
         name = "status",
         description = "Show running state, route count, Network-permission state " +
             "(whether INTERNET is granted — a revoked Network permission kills " +
-            "the forwarder), and the detected deployment role (normal | privileged).",
+            "the forwarder), the detected deployment role (normal | privileged), " +
+            "and whether ALLOW_ANY_TARGET is set (required for non-loopback " +
+            "targets and for the add_socks SOCKS5 proxy).",
         inputSchema = ToolSchema(properties = buildJsonObject {}, required = emptyList()),
     ) {
         ok(controller.status().describe())

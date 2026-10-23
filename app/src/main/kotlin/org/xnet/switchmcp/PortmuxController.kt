@@ -62,6 +62,25 @@ class PortmuxController(
         return engine.addRoute(proto, listenAddr, listenPort, target, targetPort)
     }
 
+    /**
+     * Add a SOCKS5 proxy listener. A SOCKS proxy dials arbitrary destinations
+     * supplied per-connection by the client, which is equivalent to permitting
+     * arbitrary (including non-loopback) egress. It is therefore gated behind
+     * [allowAnyTarget] and MUST NOT be enabled otherwise.
+     */
+    fun addSocks(
+        listenAddr: String,
+        listenPort: Int,
+    ): Route {
+        if (!allowAnyTarget) {
+            throw IllegalStateException(
+                "SOCKS5 proxy implies arbitrary per-connection egress; set " +
+                    "ALLOW_ANY_TARGET to enable it",
+            )
+        }
+        return engine.addSocks(listenAddr, listenPort)
+    }
+
     fun removeRoute(id: String): Boolean = engine.removeRoute(id)
 
     fun listRoutes(): List<Route> = engine.listRoutes()
