@@ -56,6 +56,28 @@ class NativePortmuxEngine(
         route
     }
 
+    override fun addSocks(
+        listenAddr: String,
+        listenPort: Int,
+    ): Route = lock.withLock {
+        require(listenPort in 1..65535) { "listen port $listenPort out of range" }
+        // A SOCKS proxy dials arbitrary per-connection targets; the target
+        // safety gate therefore cannot apply here and is enforced upstream in
+        // PortmuxController (requires allowAnyTarget).
+        val route = Route(
+            id = UUID.randomUUID().toString().take(8),
+            proto = Proto.TCP,
+            listenAddr = listenAddr.ifBlank { "127.0.0.1" },
+            listenPort = listenPort,
+            targetAddr = "",
+            targetPort = 0,
+            isSocks = true,
+        )
+        routes[route.id] = route
+        if (worker != null) respawn()
+        route
+    }
+
     override fun removeRoute(id: String): Boolean = lock.withLock {
         val removed = routes.remove(id) != null
         if (removed && worker != null) {
@@ -88,11 +110,15 @@ class NativePortmuxEngine(
         if (h == 0L) throw IllegalStateException("portmux_new failed")
         handle = h
         routes.values.forEach { r ->
-            val proto = if (r.proto == Proto.TCP) 0 else 1
-            val rc = nativeAddRoute(
-                h, proto, r.listenAddr, r.listenPort,
-                r.targetAddr, r.targetPort, EGRESS_NONE, "",
-            )
+            val rc = if (r.isSocks) {
+                nativeAddSocks(h, r.listenAddr, r.listenPort, EGRESS_NONE, "")
+            } else {
+                val proto = if (r.proto == Proto.TCP) 0 else 1
+                nativeAddRoute(
+                    h, proto, r.listenAddr, r.listenPort,
+                    r.targetAddr, r.targetPort, EGRESS_NONE, "",
+                )
+            }
             if (rc != 0) {
                 nativeDestroy(h); handle = 0L
                 throw IllegalStateException("add_route failed for ${r.summary()}")
@@ -128,6 +154,11 @@ class NativePortmuxEngine(
         handle: Long, proto: Int,
         listenAddr: String, listenPort: Int,
         targetAddr: String, targetPort: Int,
+        egressKind: Int, egressArg: String,
+    ): Int
+    private external fun nativeAddSocks(
+        handle: Long,
+        listenAddr: String, listenPort: Int,
         egressKind: Int, egressArg: String,
     ): Int
     private external fun nativeRun(handle: Long)

@@ -102,6 +102,53 @@ Java_org_xnet_switchmcp_NativePortmuxEngine_nativeAddRoute (
     return rc;
 }
 
+/* SOCKS5 proxy listener. No fixed target: the per-connection destination is
+   supplied by the SOCKS client. egressKind mirrors nativeAddRoute
+   (0 NONE, 1 SOURCE, 2 DEVICE); every upstream socket the proxy opens passes
+   through this egress, so egress pinning is applied per client connection. */
+JNIEXPORT jint JNICALL
+Java_org_xnet_switchmcp_NativePortmuxEngine_nativeAddSocks (
+    JNIEnv *env, jobject o, jlong h,
+    jstring listenAddr, jint listenPort,
+    jint egressKind, jstring egressArg)
+{
+    (void)o;
+    Portmux *pm = (Portmux *)(intptr_t)h;
+    if (!pm) return -1;
+
+    char la[128], arg[128];
+    jstr (env, listenAddr, la, sizeof la);
+    jstr (env, egressArg, arg, sizeof arg);
+
+    PortmuxEgress eg;
+    PortmuxEgress *egp = NULL;
+    memset (&eg, 0, sizeof eg);
+
+    switch (egressKind) {
+    case 1:
+        eg.kind = PORTMUX_EGRESS_SOURCE;
+        eg.source_ip = strdup (arg);
+        egp = &eg;
+        break;
+    case 2:
+        eg.kind = PORTMUX_EGRESS_DEVICE;
+        eg.device = strdup (arg);
+        egp = &eg;
+        break;
+    default:
+        egp = NULL; /* NONE */
+    }
+
+    int rc = portmux_add_socks (pm,
+                                la[0] ? la : "127.0.0.1", (int)listenPort,
+                                egp);
+    /* As in add_route, portmux keeps our string pointers by reference, so the
+       small strdup is intentionally kept for the life of the forwarder. */
+    LOGI ("add_socks rc=%d socks5 %s:%d -> (per-connection)",
+          rc, la, (int)listenPort);
+    return rc;
+}
+
 JNIEXPORT void JNICALL
 Java_org_xnet_switchmcp_NativePortmuxEngine_nativeRun (JNIEnv *env, jobject o, jlong h)
 {

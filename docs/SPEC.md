@@ -121,20 +121,32 @@ Transport: **Streamable HTTP** (current MCP standard), endpoint
 | Tool | Args | Result |
 |------|------|--------|
 | `add_route` | `proto` (tcp/udp), `listen_addr?`, `listen_port`, `target_addr?`, `target_port` | route id + summary |
+| `add_socks` | `listen_addr?`, `listen_port` | socks route id + summary |
 | `remove_route` | `id` | ok / not-found |
 | `list_routes` | — | route list |
-| `status` | — | running state, route count, **Network-permission state**, **deployment role** (normal / privileged, §9) |
+| `status` | — | running state, route count, **Network-permission state**, **deployment role** (normal / privileged, §9), **allowAnyTarget** |
 | `start` | — | start forwarding |
 | `stop` | — | stop forwarding |
 
 `status` MUST surface whether INTERNET is granted (C1), so a client can
 diagnose a dead forwarder caused by a revoked Network permission.
 
+`add_socks` registers an **RFC1928 SOCKS5 proxy** (no-auth, CONNECT and UDP
+ASSOCIATE) whose per-connection destination is chosen by the client — i.e. an
+open proxy to arbitrary destinations. Because that is equivalent to arbitrary
+egress, it is **gated behind `ALLOW_ANY_TARGET`** and is rejected unless that
+flag is set (§4 safety defaults, §12). Every upstream socket the proxy opens
+still passes through the route's egress policy, so Android per-connection egress
+pinning (`PORTMUX_EGRESS_CALLBACK`) applies exactly as for normal routes.
+
 ### Safety defaults
 
 - **Loopback targets only** unless explicitly enabled (config flag /
   `ALLOW_ANY_TARGET`), matching portmux-mcp. Non-loopback targets additionally
   require `ACCESS_LOCAL_NETWORK` to be granted (C3).
+- **SOCKS5 proxy (`add_socks`) requires `ALLOW_ANY_TARGET`.** A SOCKS proxy
+  dials arbitrary per-connection destinations, so enabling it implies arbitrary
+  egress; it is rejected unless `ALLOW_ANY_TARGET` is set (§12).
 
 ---
 
@@ -296,7 +308,7 @@ ABIs: arm64-v8a (primary), plus armeabi-v7a / x86_64 / x86 as portmux ships.
 2. Service starts (manually/intent) and the embedded engine loads (native lib
    from the APK, no separate install).
 3. MCP client over Streamable HTTP (via `adb forward`) can `initialize`,
-   `tools/list` (6 tools), `add_route` (loopback), `start`, forward a real TCP
+   `tools/list` (7 tools), `add_route` (loopback), `start`, forward a real TCP
    connection through the embedded engine, and `stop`.
 4. UDP route forwards.
 5. With INTERNET **revoked**, the server does not crash and `status` +
