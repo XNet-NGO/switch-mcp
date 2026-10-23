@@ -19,7 +19,7 @@ import kotlinx.serialization.json.putJsonObject
  */
 fun buildSwitchMcpServer(controller: PortmuxController): Server {
     val server = Server(
-        Implementation(name = "switch-mcp", version = "0.3.0"),
+        Implementation(name = "switch-mcp", version = "0.4.0"),
         ServerOptions(
             capabilities = ServerCapabilities(
                 tools = ServerCapabilities.Tools(listChanged = true),
@@ -158,6 +158,68 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
                 transport = transport,
             )
             ok("added socks ${route.id}: ${route.summary()}")
+        } catch (t: Throwable) {
+            err(t.message ?: t.toString())
+        }
+    }
+
+    // --- add_tunnel ---
+    server.addTool(
+        name = "add_tunnel",
+        description = "Add an ENCRYPTED TUNNEL client (Noise NoisePSK_NN: ephemeral " +
+            "X25519 + 32-byte pre-shared key; AES-256-GCM or ChaCha20-Poly1305). " +
+            "Dials an arbitrary remote server over one outbound connection and " +
+            "splices the decrypted stream to a local target (default " +
+            "127.0.0.1:5555, i.e. adbd) — e.g. expose this device's adb to a " +
+            "remote box with no TUN and no root. WARNING: reaching an arbitrary " +
+            "off-device server is powerful and REQUIRES the server to have been " +
+            "started with ALLOW_ANY_TARGET. The optional egress pins the outbound " +
+            "leg to a chosen network (wifi|cellular|ethernet).",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                putJsonObject("server_addr") {
+                    put("type", "string"); put("description", "rendezvous server IP/host to dial")
+                }
+                putJsonObject("server_port") {
+                    put("type", "integer"); put("description", "rendezvous server port")
+                }
+                putJsonObject("psk") {
+                    put("type", "string")
+                    put("description", "pre-shared key, 64 hex chars (32 bytes); must match the server")
+                }
+                putJsonObject("target_addr") {
+                    put("type", "string"); put("description", "local target address (default 127.0.0.1)")
+                }
+                putJsonObject("target_port") {
+                    put("type", "integer"); put("description", "local target port (default 5555 = adbd)")
+                }
+                putJsonObject("cipher") {
+                    put("type", "string"); put("description", "aesgcm (default) | chacha")
+                }
+                putEgressProps(this)
+            },
+            required = listOf("server_addr", "server_port", "psk"),
+        ),
+    ) { request ->
+        try {
+            val a = request.arguments ?: error("missing arguments")
+            val (egress, egressArg, transport) = parseEgress(a)
+            val cipher = when (a["cipher"]?.jsonPrimitive?.content?.lowercase()) {
+                "chacha", "chachapoly" -> 1
+                else -> 0
+            }
+            val route = controller.addTunnel(
+                serverAddr = a["server_addr"]!!.jsonPrimitive.content,
+                serverPort = a["server_port"]!!.jsonPrimitive.content.toInt(),
+                targetAddr = a["target_addr"]?.jsonPrimitive?.content ?: "127.0.0.1",
+                targetPort = a["target_port"]?.jsonPrimitive?.content?.toInt() ?: 5555,
+                pskHex = a["psk"]!!.jsonPrimitive.content.trim(),
+                cipher = cipher,
+                egress = egress,
+                egressArg = egressArg,
+                transport = transport,
+            )
+            ok("added tunnel ${route.id}: ${route.summary()}")
         } catch (t: Throwable) {
             err(t.message ?: t.toString())
         }

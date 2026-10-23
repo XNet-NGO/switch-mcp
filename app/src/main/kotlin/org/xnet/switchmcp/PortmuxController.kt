@@ -96,6 +96,35 @@ class PortmuxController(
         return engine.addSocks(listenAddr, listenPort, egress, egressArg, transport)
     }
 
+    /**
+     * Add an encrypted tunnel CLIENT (NoisePSK_NN) that dials an arbitrary
+     * remote server and splices to a local target (e.g. adbd). Reaching an
+     * arbitrary off-device server is a powerful capability, so it is gated
+     * behind [allowAnyTarget] exactly like the SOCKS proxy.
+     */
+    fun addTunnel(
+        serverAddr: String,
+        serverPort: Int,
+        targetAddr: String,
+        targetPort: Int,
+        pskHex: String,
+        cipher: Int = 0,
+        egress: EgressMode = EgressMode.NONE,
+        egressArg: String = "",
+        transport: NetTransport = NetTransport.ANY,
+    ): Route {
+        if (!allowAnyTarget) {
+            throw IllegalStateException(
+                "encrypted tunnel reaches an arbitrary remote server; set " +
+                    "ALLOW_ANY_TARGET to enable it",
+            )
+        }
+        return engine.addTunnel(
+            serverAddr, serverPort, targetAddr, targetPort, pskHex, cipher,
+            egress, egressArg, transport,
+        )
+    }
+
     fun removeRoute(id: String): Boolean = engine.removeRoute(id)
 
     fun listRoutes(): List<Route> = engine.listRoutes()
