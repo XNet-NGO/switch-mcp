@@ -36,6 +36,12 @@ data class Route(
     val egress: EgressMode = EgressMode.NONE,
     val egressArg: String = "",
     val transport: NetTransport = NetTransport.ANY,
+    /** True if this is an encrypted tunnel CLIENT: it dials [serverAddr]:
+     *  [serverPort] over NoisePSK_NN and splices to [targetAddr]:[targetPort].
+     *  [listenPort] is unused for tunnels. */
+    val isTunnel: Boolean = false,
+    val serverAddr: String = "",
+    val serverPort: Int = 0,
 ) {
     fun summary(): String {
         val eg = when (egress) {
@@ -43,6 +49,7 @@ data class Route(
             EgressMode.SOURCE -> "  src=$egressArg"
             EgressMode.NETWORK -> "  via ${transport.name.lowercase()}"
         }
+        if (isTunnel) return "tunnel  -> $serverAddr:$serverPort => $targetAddr:$targetPort (encrypted)$eg"
         if (isSocks) return "socks5  $listenAddr:$listenPort -> (per-connection)$eg"
         val p = if (proto == Proto.TCP) "tcp" else "udp"
         return "$p  $listenAddr:$listenPort -> $targetAddr:$targetPort$eg"
@@ -77,6 +84,25 @@ interface PortmuxEngine {
     fun addSocks(
         listenAddr: String,
         listenPort: Int,
+        egress: EgressMode = EgressMode.NONE,
+        egressArg: String = "",
+        transport: NetTransport = NetTransport.ANY,
+    ): Route
+
+    /**
+     * Add an encrypted tunnel CLIENT: dial [serverAddr]:[serverPort] over
+     * NoisePSK_NN (authenticated by [pskHex], 64 hex chars) and splice the
+     * decrypted stream to [targetAddr]:[targetPort]. [cipher] 0=AES-GCM,
+     * 1=ChaCha20-Poly1305. The outbound leg may be egress-pinned. Reaching an
+     * arbitrary remote server is sensitive, so callers MUST gate it.
+     */
+    fun addTunnel(
+        serverAddr: String,
+        serverPort: Int,
+        targetAddr: String,
+        targetPort: Int,
+        pskHex: String,
+        cipher: Int = 0,
         egress: EgressMode = EgressMode.NONE,
         egressArg: String = "",
         transport: NetTransport = NetTransport.ANY,

@@ -36,6 +36,13 @@ class NativePortmuxEngine(
     private var worker: Thread? = null
     private var requester: NetworkRequester? = null
 
+    // Tunnel secrets kept out of the Route (which is returned to callers/logged):
+    // the PSK (64 hex) and cipher per tunnel route id.
+    private val tunnelPsk = HashMap<String, String>()
+    private val tunnelCipher = HashMap<String, Int>()
+
+    private fun Char.isHexDigit() = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
     override fun addRoute(
         proto: Proto,
         listenAddr: String,
@@ -97,7 +104,47 @@ class NativePortmuxEngine(
         route
     }
 
+    override fun addTunnel(
+        serverAddr: String,
+        serverPort: Int,
+        targetAddr: String,
+        targetPort: Int,
+        pskHex: String,
+        cipher: Int,
+        egress: EgressMode,
+        egressArg: String,
+        transport: NetTransport,
+    ): Route = lock.withLock {
+        require(serverPort in 1..65535) { "server port $serverPort out of range" }
+        require(targetPort in 1..65535) { "target port $targetPort out of range" }
+        require(pskHex.length == 64 && pskHex.all { it.isHexDigit() }) {
+            "psk must be 64 hex chars (32 bytes)"
+        }
+        require(serverAddr.isNotBlank()) { "server address required" }
+        validateEgress(egress, egressArg)
+        val route = Route(
+            id = UUID.randomUUID().toString().take(8),
+            proto = Proto.TCP,
+            listenAddr = "",
+            listenPort = 0,
+            targetAddr = targetAddr.ifBlank { "127.0.0.1" },
+            targetPort = targetPort,
+            isTunnel = true,
+            serverAddr = serverAddr,
+            serverPort = serverPort,
+            egress = egress,
+            egressArg = egressArg,
+            transport = transport,
+        )
+        tunnelPsk[route.id] = pskHex
+        tunnelCipher[route.id] = cipher
+        routes[route.id] = route
+        if (worker != null) respawn()
+        route
+    }
+
     override fun removeRoute(id: String): Boolean = lock.withLock {
+        tunnelPsk.remove(id); tunnelCipher.remove(id)
         val removed = routes.remove(id) != null
         if (removed && worker != null) {
             if (routes.isEmpty()) stopLocked() else respawn()
@@ -170,7 +217,13 @@ class NativePortmuxEngine(
                 netHandle = 0L
                 token = 0
             }
-            val rc = if (r.isSocks) {
+            val rc = if (r.isTunnel) {
+                nativeAddTunnelClient(
+                    h, r.serverAddr, r.serverPort, r.targetAddr, r.targetPort,
+                    tunnelPsk[r.id] ?: "", tunnelCipher[r.id] ?: 0,
+                    kind, r.egressArg, netHandle, token,
+                )
+            } else if (r.isSocks) {
                 nativeAddSocks(h, r.listenAddr, r.listenPort, kind, r.egressArg, netHandle, token)
             } else {
                 val proto = if (r.proto == Proto.TCP) 0 else 1
@@ -222,6 +275,14 @@ class NativePortmuxEngine(
     private external fun nativeAddSocks(
         handle: Long,
         listenAddr: String, listenPort: Int,
+        egressKind: Int, egressArg: String,
+        networkHandle: Long, token: Int,
+    ): Int
+    private external fun nativeAddTunnelClient(
+        handle: Long,
+        serverAddr: String, serverPort: Int,
+        targetAddr: String, targetPort: Int,
+        pskHex: String, cipher: Int,
         egressKind: Int, egressArg: String,
         networkHandle: Long, token: Int,
     ): Int
