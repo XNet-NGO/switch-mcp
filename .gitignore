@@ -10,3 +10,4 @@ app/build/
 app/.cxx/
 # Prebuilt portmux artifacts are fetched/copied, not committed.
 app/.portmux/
+*.pre-optA.bak
