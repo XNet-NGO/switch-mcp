@@ -114,6 +114,11 @@ class NativePortmuxEngine(
         egress: EgressMode,
         egressArg: String,
         transport: NetTransport,
+        revListenAddr: String,
+        revListenPort: Int,
+        revTargetAddr: String,
+        revTargetPort: Int,
+        revProto: Int,
     ): Route = lock.withLock {
         require(serverPort in 1..65535) { "server port $serverPort out of range" }
         require(targetPort in 1..65535) { "target port $targetPort out of range" }
@@ -121,6 +126,18 @@ class NativePortmuxEngine(
             "psk must be 64 hex chars (32 bytes)"
         }
         require(serverAddr.isNotBlank()) { "server address required" }
+        if (revListenPort > 0) {
+            require(revListenPort in 1..65535) { "reverse listen port $revListenPort out of range" }
+            require(revTargetPort in 1..65535) { "reverse target port $revTargetPort out of range" }
+            require(revProto in 0..2) { "reverse proto must be 0(TCP), 1(UDP), or 2(BOTH)" }
+            // Reverse target is a server-side connect; gate non-loopback behind allowAnyTarget
+            val rtarget = revTargetAddr.ifBlank { "127.0.0.1" }
+            if (!allowNonLoopbackTargets && !isLoopback(rtarget)) {
+                throw IllegalArgumentException(
+                    "reverse target '$rtarget' is not loopback; enable ALLOW_ANY_TARGET to permit non-loopback reverse targets",
+                )
+            }
+        }
         validateEgress(egress, egressArg)
         val route = Route(
             id = UUID.randomUUID().toString().take(8),
@@ -135,6 +152,11 @@ class NativePortmuxEngine(
             egress = egress,
             egressArg = egressArg,
             transport = transport,
+            revListenAddr = revListenAddr,
+            revListenPort = revListenPort,
+            revTargetAddr = revTargetAddr,
+            revTargetPort = revTargetPort,
+            revProto = revProto,
         )
         tunnelPsk[route.id] = pskHex
         tunnelCipher[route.id] = cipher
@@ -222,6 +244,7 @@ class NativePortmuxEngine(
                     h, r.serverAddr, r.serverPort, r.targetAddr, r.targetPort,
                     tunnelPsk[r.id] ?: "", tunnelCipher[r.id] ?: 0,
                     kind, r.egressArg, netHandle, token,
+                    r.revListenAddr, r.revListenPort, r.revTargetAddr, r.revTargetPort, r.revProto,
                 )
             } else if (r.isSocks) {
                 nativeAddSocks(h, r.listenAddr, r.listenPort, kind, r.egressArg, netHandle, token)
@@ -285,6 +308,8 @@ class NativePortmuxEngine(
         pskHex: String, cipher: Int,
         egressKind: Int, egressArg: String,
         networkHandle: Long, token: Int,
+        rlistenAddr: String, rlistenPort: Int,
+        rtargetAddr: String, rtargetPort: Int, rproto: Int,
     ): Int
     private external fun nativeUpdateNetworkHandle(token: Int, netHandle: Long)
     private external fun nativeRun(handle: Long)

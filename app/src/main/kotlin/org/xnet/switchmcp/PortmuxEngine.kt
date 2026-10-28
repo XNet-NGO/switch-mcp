@@ -42,6 +42,16 @@ data class Route(
     val isTunnel: Boolean = false,
     val serverAddr: String = "",
     val serverPort: Int = 0,
+    /** Reverse-forward (v0.4.0): [revListenAddr]:[revListenPort] opens a
+     *  REVERSE LISTENER on the client (when revListenPort>0). Connections there
+     *  become client-originated reverse streams the server splices to
+     *  [revTargetAddr]:[revTargetPort]. [revProto] sets the reverse listener
+     *  protocol: 0=TCP, 1=UDP, 2=BOTH (dual-stack). */
+    val revListenAddr: String = "",
+    val revListenPort: Int = 0,
+    val revTargetAddr: String = "",
+    val revTargetPort: Int = 0,
+    val revProto: Int = 0,
 ) {
     fun summary(): String {
         val eg = when (egress) {
@@ -49,7 +59,18 @@ data class Route(
             EgressMode.SOURCE -> "  src=$egressArg"
             EgressMode.NETWORK -> "  via ${transport.name.lowercase()}"
         }
-        if (isTunnel) return "tunnel  -> $serverAddr:$serverPort => $targetAddr:$targetPort (encrypted)$eg"
+        if (isTunnel) {
+            val fwd = "tunnel  -> $serverAddr:$serverPort => $targetAddr:$targetPort (encrypted)$eg"
+            if (revListenPort > 0) {
+                val rprotoStr = when (revProto) {
+                    1 -> "udp"
+                    2 -> "tcp+udp"
+                    else -> "tcp"
+                }
+                return "$fwd + reverse $rprotoStr $revListenAddr:$revListenPort <- $revTargetAddr:$revTargetPort"
+            }
+            return fwd
+        }
         if (isSocks) return "socks5  $listenAddr:$listenPort -> (per-connection)$eg"
         val p = if (proto == Proto.TCP) "tcp" else "udp"
         return "$p  $listenAddr:$listenPort -> $targetAddr:$targetPort$eg"
@@ -95,6 +116,12 @@ interface PortmuxEngine {
      * decrypted stream to [targetAddr]:[targetPort]. [cipher] 0=AES-GCM,
      * 1=ChaCha20-Poly1305. The outbound leg may be egress-pinned. Reaching an
      * arbitrary remote server is sensitive, so callers MUST gate it.
+     * 
+     * Reverse-forward (v0.4.0): [revListenAddr]:[revListenPort] opens a REVERSE
+     * LISTENER on the client (when revListenPort>0). Connections there become
+     * client-originated reverse streams the server splices to
+     * [revTargetAddr]:[revTargetPort]. [revProto] sets the reverse listener
+     * protocol: 0=TCP, 1=UDP, 2=BOTH (dual-stack TCP+UDP on one port).
      */
     fun addTunnel(
         serverAddr: String,
@@ -106,6 +133,11 @@ interface PortmuxEngine {
         egress: EgressMode = EgressMode.NONE,
         egressArg: String = "",
         transport: NetTransport = NetTransport.ANY,
+        revListenAddr: String = "",
+        revListenPort: Int = 0,
+        revTargetAddr: String = "",
+        revTargetPort: Int = 0,
+        revProto: Int = 0,
     ): Route
 
     /** Remove a route by id. Returns true if it existed. */

@@ -101,6 +101,10 @@ class PortmuxController(
      * remote server and splices to a local target (e.g. adbd). Reaching an
      * arbitrary off-device server is a powerful capability, so it is gated
      * behind [allowAnyTarget] exactly like the SOCKS proxy.
+     * 
+     * Reverse-forward (v0.4.0): revListenPort>0 opens a REVERSE LISTENER on the
+     * client; the server connects to revTargetAddr:revTargetPort on a reverse
+     * OPEN. Reverse targets are gated behind allowAnyTarget for non-loopback.
      */
     fun addTunnel(
         serverAddr: String,
@@ -112,6 +116,11 @@ class PortmuxController(
         egress: EgressMode = EgressMode.NONE,
         egressArg: String = "",
         transport: NetTransport = NetTransport.ANY,
+        revListenAddr: String = "",
+        revListenPort: Int = 0,
+        revTargetAddr: String = "",
+        revTargetPort: Int = 0,
+        revProto: Int = 0,
     ): Route {
         if (!allowAnyTarget) {
             throw IllegalStateException(
@@ -119,9 +128,19 @@ class PortmuxController(
                     "ALLOW_ANY_TARGET to enable it",
             )
         }
+        // Reverse target is a server-side connect; gate non-loopback behind allowAnyTarget
+        if (revListenPort > 0) {
+            val rtarget = revTargetAddr.ifBlank { "127.0.0.1" }
+            if (!isLoopback(rtarget) && !allowAnyTarget) {
+                throw IllegalArgumentException(
+                    "reverse target '$rtarget' is not loopback; set ALLOW_ANY_TARGET to permit non-loopback reverse targets",
+                )
+            }
+        }
         return engine.addTunnel(
             serverAddr, serverPort, targetAddr, targetPort, pskHex, cipher,
             egress, egressArg, transport,
+            revListenAddr, revListenPort, revTargetAddr, revTargetPort, revProto,
         )
     }
 

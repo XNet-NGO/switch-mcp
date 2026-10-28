@@ -122,6 +122,7 @@ Transport: **Streamable HTTP** (current MCP standard), endpoint
 |------|------|--------|
 | `add_route` | `proto` (tcp/udp), `listen_addr?`, `listen_port`, `target_addr?`, `target_port` | route id + summary |
 | `add_socks` | `listen_addr?`, `listen_port` | socks route id + summary |
+| `add_tunnel` | `server_addr`, `server_port`, `psk`, `target_addr?`, `target_port?`, `cipher?`, `rlisten_addr?`, `rlisten_port?`, `rtarget_addr?`, `rtarget_port?`, `rproto?` | tunnel route id + summary |
 | `remove_route` | `id` | ok / not-found |
 | `list_routes` | — | route list |
 | `status` | — | running state, route count, **Network-permission state**, **deployment role** (normal / privileged, §9), **allowAnyTarget** |
@@ -138,6 +139,18 @@ egress, it is **gated behind `ALLOW_ANY_TARGET`** and is rejected unless that
 flag is set (§4 safety defaults, §12). Every upstream socket the proxy opens
 still passes through the route's egress policy, so Android per-connection egress
 pinning (`PORTMUX_EGRESS_CALLBACK`) applies exactly as for normal routes.
+
+`add_tunnel` registers an **encrypted tunnel CLIENT** (NoisePSK_NN over
+portmux v0.4.0+). The traditional forward-only tunnel dials `server_addr:server_port`
+and splices the decrypted stream to `target_addr:target_port` (e.g. 127.0.0.1:5555
+adbd). **Reverse-forward (v0.4.0)**: when `rlisten_port>0`, the client opens a
+REVERSE LISTENER at `rlisten_addr:rlisten_port` (ssh -R style). Connections
+there become client-originated reverse streams the server splices to
+`rtarget_addr:rtarget_port` on the server side. `rproto` sets the reverse
+listener protocol: `tcp` (default), `udp`, or `both` (dual-stack TCP+UDP on one
+port). Non-loopback reverse targets on the server are gated behind
+`ALLOW_ANY_TARGET` just like forward targets, maintaining the existing safety
+posture.
 
 ### Safety defaults
 
