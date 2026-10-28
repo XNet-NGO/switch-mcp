@@ -105,6 +105,12 @@ class PortmuxController(
      * Reverse-forward (v0.4.0): revListenPort>0 opens a REVERSE LISTENER on the
      * client; the server connects to revTargetAddr:revTargetPort on a reverse
      * OPEN. Reverse targets are gated behind allowAnyTarget for non-loopback.
+     *
+     * Multi-hop jumps (v0.5.0): when jumpHops is non-empty this client is the
+     * chain edge/originator. jumpHops[0] must equal serverAddr:serverPort.
+     * The terminal jump target (jumpTargetAddr:jumpTargetPort) is a final
+     * connect, so non-loopback is gated behind allowAnyTarget like forward and
+     * reverse targets.
      */
     fun addTunnel(
         serverAddr: String,
@@ -121,6 +127,10 @@ class PortmuxController(
         revTargetAddr: String = "",
         revTargetPort: Int = 0,
         revProto: Int = 0,
+        jumpHops: List<String> = emptyList(),
+        jumpTargetAddr: String = "",
+        jumpTargetPort: Int = 0,
+        jumpProto: Int = 0,
     ): Route {
         if (!allowAnyTarget) {
             throw IllegalStateException(
@@ -137,11 +147,46 @@ class PortmuxController(
                 )
             }
         }
+        // Final jump target is a terminal connect; gate non-loopback behind allowAnyTarget
+        if (jumpHops.isNotEmpty()) {
+            val jtarget = jumpTargetAddr.ifBlank { "127.0.0.1" }
+            if (!isLoopback(jtarget) && !allowAnyTarget) {
+                throw IllegalArgumentException(
+                    "jump target '$jtarget' is not loopback; set ALLOW_ANY_TARGET to permit non-loopback jump targets",
+                )
+            }
+        }
         return engine.addTunnel(
             serverAddr, serverPort, targetAddr, targetPort, pskHex, cipher,
             egress, egressArg, transport,
             revListenAddr, revListenPort, revTargetAddr, revTargetPort, revProto,
+            jumpHops, jumpTargetAddr, jumpTargetPort, jumpProto,
         )
+    }
+
+    /**
+     * Add a relay PEER (v0.5.0): a single-port peek-demux tunnel server that
+     * accepts encrypted carriers and relays OPENJ multi-hop streams onward (or
+     * connects the terminal target). A peer can dial arbitrary next hops /
+     * terminal targets, so — like the tunnel client and the SOCKS proxy — it is
+     * gated behind [allowAnyTarget] and MUST NOT be enabled otherwise.
+     */
+    fun addPeer(
+        listenAddr: String,
+        listenPort: Int,
+        pskHex: String,
+        cipher: Int = 0,
+        egress: EgressMode = EgressMode.NONE,
+        egressArg: String = "",
+        transport: NetTransport = NetTransport.ANY,
+    ): Route {
+        if (!allowAnyTarget) {
+            throw IllegalStateException(
+                "relay peer forwards to arbitrary next hops / terminal targets; " +
+                    "set ALLOW_ANY_TARGET to enable it",
+            )
+        }
+        return engine.addPeer(listenAddr, listenPort, pskHex, cipher, egress, egressArg, transport)
     }
 
     fun removeRoute(id: String): Boolean = engine.removeRoute(id)

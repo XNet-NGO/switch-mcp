@@ -375,3 +375,119 @@ Java_org_xnet_switchmcp_NativePortmuxEngine_nativeAddTunnelClient (
           rla, (int)rlistenPort, rta, (int)rtargetPort, (int)rproto);
     return rc;
 }
+
+/* Encrypted tunnel PEER (v0.5.0): a single-port peek-demux tunnel server that
+   relays OPENJ multi-hop streams to the next hop (honoring egress) or connects
+   the terminal target when no hops remain. Accepts encrypted carriers on
+   listenAddr:listenPort. Shares the single psk/cipher with every peer in the
+   chain. cipher: 0=AES-GCM, 1=ChaCha20-Poly1305. */
+JNIEXPORT jint JNICALL
+Java_org_xnet_switchmcp_NativePortmuxEngine_nativeAddTunnelPeer (
+    JNIEnv *env, jobject o, jlong h,
+    jstring listenAddr, jint listenPort,
+    jstring pskHex, jint cipher,
+    jint egressKind, jstring egressArg, jlong networkHandle, jint token)
+{
+    (void)o;
+    Portmux *pm = (Portmux *)(intptr_t)h;
+    if (!pm) return -1;
+
+    char la[128], arg[128], pk[128];
+    jstr (env, listenAddr, la, sizeof la);
+    jstr (env, egressArg, arg, sizeof arg);
+    jstr (env, pskHex, pk, sizeof pk);
+
+    unsigned char psk[PM_TUNNEL_PSK_LEN];
+    if (parse_psk_hex (pk, psk) < 0) {
+        LOGW ("add_peer: bad PSK (need 64 hex chars)");
+        return -1;
+    }
+
+    PortmuxEgress eg;
+    PortmuxEgress *egp = NULL;
+    build_egress (egressKind, arg, networkHandle, token, &eg, &egp);
+
+    PmTunnelCipher cph = (cipher == 1) ? PM_TUNNEL_CIPHER_CHACHAPOLY
+                                       : PM_TUNNEL_CIPHER_AESGCM;
+
+    int rc = portmux_add_tunnel_peer (pm, la[0] ? la : "127.0.0.1",
+                                      (int)listenPort, psk, cph, egp);
+
+    /* wipe the local PSK copy */
+    memset (psk, 0, sizeof psk);
+    LOGI ("add_peer rc=%d listen=%s:%d cipher=%d egress=%d token=%d",
+          rc, la, (int)listenPort, (int)cipher, (int)egressKind, (int)token);
+    return rc;
+}
+
+/* Parse a decimal int from [s, end); returns the value, defaulting to 0 on an
+   empty/invalid field. */
+static int
+parse_int_field (const char *s, size_t len)
+{
+    char tmp[16];
+    size_t n = len < sizeof tmp - 1 ? len : sizeof tmp - 1;
+    memcpy (tmp, s, n);
+    tmp[n] = '\0';
+    return (int)strtol (tmp, NULL, 10);
+}
+
+/* Multi-hop jumps (v0.5.0): configure the EDGE originator's jump-list on the
+   most-recently-added tunnel route (call right after the edge
+   nativeAddTunnelClient). hopsAddrCsv / hopsPortCsv are comma-separated lists
+   (same arity) of the ordered next-hops; hops[0] MUST equal that client's
+   carrier dest. targetAddr:targetPort is the final destination; proto is the
+   final leg (0=TCP, 1=UDP). nhops must be 1..PM_MUX_MAX_HOPS. */
+JNIEXPORT jint JNICALL
+Java_org_xnet_switchmcp_NativePortmuxEngine_nativeSetJumps (
+    JNIEnv *env, jobject o, jlong h,
+    jstring hopsAddrCsv, jstring hopsPortCsv,
+    jstring targetAddr, jint targetPort, jint proto)
+{
+    (void)o;
+    Portmux *pm = (Portmux *)(intptr_t)h;
+    if (!pm) return -1;
+
+    char addrs[512], ports[256], ta[128];
+    jstr (env, hopsAddrCsv, addrs, sizeof addrs);
+    jstr (env, hopsPortCsv, ports, sizeof ports);
+    jstr (env, targetAddr, ta, sizeof ta);
+
+    PmJumpEndpoint hops[PM_MUX_MAX_HOPS];
+    memset (hops, 0, sizeof hops);
+    int nhops = 0;
+
+    /* Walk the two CSVs in lockstep. */
+    const char *ap = addrs;
+    const char *pp = ports;
+    while (*ap && nhops < PM_MUX_MAX_HOPS) {
+        const char *acomma = strchr (ap, ',');
+        size_t alen = acomma ? (size_t)(acomma - ap) : strlen (ap);
+        if (alen == 0) break;
+        size_t acopy = alen < sizeof hops[nhops].addr - 1
+                       ? alen : sizeof hops[nhops].addr - 1;
+        memcpy (hops[nhops].addr, ap, acopy);
+        hops[nhops].addr[acopy] = '\0';
+
+        const char *pcomma = pp ? strchr (pp, ',') : NULL;
+        size_t plen = pp ? (pcomma ? (size_t)(pcomma - pp) : strlen (pp)) : 0;
+        hops[nhops].port = pp ? parse_int_field (pp, plen) : 0;
+
+        nhops++;
+        ap = acomma ? acomma + 1 : ap + alen;
+        if (pp) pp = pcomma ? pcomma + 1 : pp + plen;
+    }
+
+    if (nhops < 1) {
+        LOGW ("set_jumps: no hops parsed");
+        return -1;
+    }
+
+    int rc = portmux_tunnel_set_jumps (pm, hops, nhops,
+                                       ta[0] ? ta : "127.0.0.1",
+                                       (int)targetPort, (int)proto);
+    LOGI ("set_jumps rc=%d nhops=%d hop0=%s:%d target=%s:%d proto=%d",
+          rc, nhops, hops[0].addr, hops[0].port, ta, (int)targetPort,
+          (int)proto);
+    return rc;
+}

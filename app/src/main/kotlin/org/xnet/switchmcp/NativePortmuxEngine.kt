@@ -119,6 +119,10 @@ class NativePortmuxEngine(
         revTargetAddr: String,
         revTargetPort: Int,
         revProto: Int,
+        jumpHops: List<String>,
+        jumpTargetAddr: String,
+        jumpTargetPort: Int,
+        jumpProto: Int,
     ): Route = lock.withLock {
         require(serverPort in 1..65535) { "server port $serverPort out of range" }
         require(targetPort in 1..65535) { "target port $targetPort out of range" }
@@ -135,6 +139,30 @@ class NativePortmuxEngine(
             if (!allowNonLoopbackTargets && !isLoopback(rtarget)) {
                 throw IllegalArgumentException(
                     "reverse target '$rtarget' is not loopback; enable ALLOW_ANY_TARGET to permit non-loopback reverse targets",
+                )
+            }
+        }
+        if (jumpHops.isNotEmpty()) {
+            require(jumpHops.size in 1..PM_MUX_MAX_HOPS) {
+                "jump hops count ${jumpHops.size} out of range (1..$PM_MUX_MAX_HOPS)"
+            }
+            require(jumpProto in 0..1) { "jump proto must be 0(TCP) or 1(UDP)" }
+            require(jumpTargetPort in 1..65535) { "jump target port $jumpTargetPort out of range" }
+            // A jump chain requires a reverse listener as the local plaintext
+            // entry that emits OPENJ (per the v0.5.0 contract).
+            require(revListenPort > 0) {
+                "jump routing requires a reverse listener (revListenPort>0) as the local OPENJ entry"
+            }
+            // hops[0] must equal the carrier dest (serverAddr:serverPort).
+            val first = jumpHops.first()
+            require(first == "$serverAddr:$serverPort") {
+                "jumpHops[0] ('$first') must equal the carrier dest '$serverAddr:$serverPort'"
+            }
+            // Final jump target is a terminal connect; gate non-loopback.
+            val jtarget = jumpTargetAddr.ifBlank { "127.0.0.1" }
+            if (!allowNonLoopbackTargets && !isLoopback(jtarget)) {
+                throw IllegalArgumentException(
+                    "jump target '$jtarget' is not loopback; enable ALLOW_ANY_TARGET to permit non-loopback jump targets",
                 )
             }
         }
@@ -157,6 +185,43 @@ class NativePortmuxEngine(
             revTargetAddr = revTargetAddr,
             revTargetPort = revTargetPort,
             revProto = revProto,
+            jumpHops = jumpHops,
+            jumpTargetAddr = jumpTargetAddr.ifBlank { "127.0.0.1" },
+            jumpTargetPort = jumpTargetPort,
+            jumpProto = jumpProto,
+        )
+        tunnelPsk[route.id] = pskHex
+        tunnelCipher[route.id] = cipher
+        routes[route.id] = route
+        if (worker != null) respawn()
+        route
+    }
+
+    override fun addPeer(
+        listenAddr: String,
+        listenPort: Int,
+        pskHex: String,
+        cipher: Int,
+        egress: EgressMode,
+        egressArg: String,
+        transport: NetTransport,
+    ): Route = lock.withLock {
+        require(listenPort in 1..65535) { "listen port $listenPort out of range" }
+        require(pskHex.length == 64 && pskHex.all { it.isHexDigit() }) {
+            "psk must be 64 hex chars (32 bytes)"
+        }
+        validateEgress(egress, egressArg)
+        val route = Route(
+            id = UUID.randomUUID().toString().take(8),
+            proto = Proto.TCP,
+            listenAddr = listenAddr.ifBlank { "127.0.0.1" },
+            listenPort = listenPort,
+            targetAddr = "",
+            targetPort = 0,
+            isPeer = true,
+            egress = egress,
+            egressArg = egressArg,
+            transport = transport,
         )
         tunnelPsk[route.id] = pskHex
         tunnelCipher[route.id] = cipher
@@ -240,11 +305,26 @@ class NativePortmuxEngine(
                 token = 0
             }
             val rc = if (r.isTunnel) {
-                nativeAddTunnelClient(
+                val crc = nativeAddTunnelClient(
                     h, r.serverAddr, r.serverPort, r.targetAddr, r.targetPort,
                     tunnelPsk[r.id] ?: "", tunnelCipher[r.id] ?: 0,
                     kind, r.egressArg, netHandle, token,
                     r.revListenAddr, r.revListenPort, r.revTargetAddr, r.revTargetPort, r.revProto,
+                )
+                // v0.5.0: configure the edge jump-list immediately after the
+                // edge client is added (set_jumps targets the most-recent route).
+                if (crc == 0 && r.jumpHops.isNotEmpty()) {
+                    val hopsAddrCsv = r.jumpHops.joinToString(",") { it.substringBeforeLast(':') }
+                    val hopsPortCsv = r.jumpHops.joinToString(",") { it.substringAfterLast(':') }
+                    nativeSetJumps(h, hopsAddrCsv, hopsPortCsv, r.jumpTargetAddr, r.jumpTargetPort, r.jumpProto)
+                } else {
+                    crc
+                }
+            } else if (r.isPeer) {
+                nativeAddTunnelPeer(
+                    h, r.listenAddr, r.listenPort,
+                    tunnelPsk[r.id] ?: "", tunnelCipher[r.id] ?: 0,
+                    kind, r.egressArg, netHandle, token,
                 )
             } else if (r.isSocks) {
                 nativeAddSocks(h, r.listenAddr, r.listenPort, kind, r.egressArg, netHandle, token)
@@ -311,6 +391,18 @@ class NativePortmuxEngine(
         rlistenAddr: String, rlistenPort: Int,
         rtargetAddr: String, rtargetPort: Int, rproto: Int,
     ): Int
+    private external fun nativeAddTunnelPeer(
+        handle: Long,
+        listenAddr: String, listenPort: Int,
+        pskHex: String, cipher: Int,
+        egressKind: Int, egressArg: String,
+        networkHandle: Long, token: Int,
+    ): Int
+    private external fun nativeSetJumps(
+        handle: Long,
+        hopsAddrCsv: String, hopsPortCsv: String,
+        targetAddr: String, targetPort: Int, proto: Int,
+    ): Int
     private external fun nativeUpdateNetworkHandle(token: Int, netHandle: Long)
     private external fun nativeRun(handle: Long)
     private external fun nativeStop(handle: Long)
@@ -324,6 +416,9 @@ class NativePortmuxEngine(
         const val EGRESS_SOURCE = 1
         const val EGRESS_DEVICE = 2
         const val EGRESS_CALLBACK = 3
+
+        // Cap on jump-list length, mirrored from portmux-tunnel.h (v0.5.0).
+        const val PM_MUX_MAX_HOPS = 8
 
         init {
             System.loadLibrary("switchmcp")
