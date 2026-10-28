@@ -178,7 +178,15 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
             "(v0.4.0): rlisten_port>0 opens a REVERSE LISTENER on the CLIENT " +
             "(ssh -R style): connections there become client-originated reverse " +
             "streams the server splices to rtarget_addr:rtarget_port. rproto sets " +
-            "the reverse listener protocol: tcp (default), udp, or both (dual-stack).",
+            "the reverse listener protocol: tcp (default), udp, or both (dual-stack). " +
+            "MULTI-HOP JUMPS (v0.5.0): pass jumps as an array of \"addr:port\" " +
+            "next-hops (or jump_hops as a comma-separated string) to make this " +
+            "client the chain EDGE/originator. jumps[0] MUST equal " +
+            "server_addr:server_port (the carrier dest); the OPENJ carries the " +
+            "remaining hops + jump_target_addr:jump_target_port (final dest). " +
+            "jump_proto is the final leg: tcp (default) or udp. A jump chain " +
+            "requires a reverse listener (rlisten_port>0) as the local plaintext " +
+            "entry that emits OPENJ. Relay the chain through add_peer nodes.",
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 putJsonObject("server_addr") {
@@ -221,6 +229,31 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
                     put("type", "string")
                     put("description", "reverse listener protocol: tcp (default), udp, or both (dual-stack; v0.4.0)")
                 }
+                putJsonObject("jumps") {
+                    put("type", "array")
+                    putJsonObject("items") { put("type", "string") }
+                    put(
+                        "description",
+                        "multi-hop jump list: ordered \"addr:port\" next-hops (v0.5.0). " +
+                            "jumps[0] MUST equal server_addr:server_port. Requires rlisten_port>0.",
+                    )
+                }
+                putJsonObject("jump_hops") {
+                    put("type", "string")
+                    put("description", "alternative to jumps: comma-separated \"addr:port\" next-hops (v0.5.0)")
+                }
+                putJsonObject("jump_target_addr") {
+                    put("type", "string")
+                    put("description", "final jump destination address (default 127.0.0.1; v0.5.0)")
+                }
+                putJsonObject("jump_target_port") {
+                    put("type", "integer")
+                    put("description", "final jump destination port (required if jumps set; v0.5.0)")
+                }
+                putJsonObject("jump_proto") {
+                    put("type", "string")
+                    put("description", "final jump leg protocol: tcp (default) or udp (v0.5.0)")
+                }
             },
             required = listOf("server_addr", "server_port", "psk"),
         ),
@@ -239,6 +272,23 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
                 "both", "tcp+udp", "dual" -> 2
                 else -> 0
             }
+            // Jumps: accept either a JSON array `jumps` or a comma-separated
+            // `jump_hops` string. Each entry is "addr:port".
+            val jumpHops: List<String> = run {
+                val arr = a["jumps"] as? kotlinx.serialization.json.JsonArray
+                if (arr != null) {
+                    arr.map { it.jsonPrimitive.content.trim() }.filter { it.isNotEmpty() }
+                } else {
+                    a["jump_hops"]?.jsonPrimitive?.content
+                        ?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }
+                        ?: emptyList()
+                }
+            }
+            val jumpTargetPort = a["jump_target_port"]?.jsonPrimitive?.content?.toInt() ?: 0
+            val jumpProto = when (a["jump_proto"]?.jsonPrimitive?.content?.lowercase()?.trim()) {
+                "udp" -> 1
+                else -> 0
+            }
             val route = controller.addTunnel(
                 serverAddr = a["server_addr"]!!.jsonPrimitive.content,
                 serverPort = a["server_port"]!!.jsonPrimitive.content.toInt(),
@@ -254,8 +304,68 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
                 revTargetAddr = a["rtarget_addr"]?.jsonPrimitive?.content ?: "127.0.0.1",
                 revTargetPort = rtargetPort,
                 revProto = rproto,
+                jumpHops = jumpHops,
+                jumpTargetAddr = a["jump_target_addr"]?.jsonPrimitive?.content ?: "127.0.0.1",
+                jumpTargetPort = jumpTargetPort,
+                jumpProto = jumpProto,
             )
             ok("added tunnel ${route.id}: ${route.summary()}")
+        } catch (t: Throwable) {
+            err(t.message ?: t.toString())
+        }
+    }
+
+    // --- add_peer ---
+    server.addTool(
+        name = "add_peer",
+        description = "Add a relay PEER (v0.5.0): a single-port peek-demux tunnel " +
+            "server (Noise NoisePSK_NN) that accepts encrypted carriers on " +
+            "listen_port and either relays an OPENJ multi-hop stream to the next " +
+            "hop or connects the terminal target when no hops remain. Peers form " +
+            "the intermediate/terminal nodes of a jump chain whose edge is an " +
+            "add_tunnel with jumps set; every node in the chain shares one psk/" +
+            "cipher. WARNING: a peer forwards to arbitrary next hops / terminal " +
+            "targets, so it REQUIRES the server to have been started with " +
+            "ALLOW_ANY_TARGET (otherwise it is rejected). The optional egress " +
+            "pins the peer's onward leg to a chosen network (wifi|cellular|ethernet).",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                putJsonObject("listen_addr") {
+                    put("type", "string")
+                    put("description", "listen address for encrypted carriers (default 127.0.0.1)")
+                }
+                putJsonObject("listen_port") {
+                    put("type", "integer"); put("description", "local port to accept encrypted carriers on")
+                }
+                putJsonObject("psk") {
+                    put("type", "string")
+                    put("description", "pre-shared key, 64 hex chars (32 bytes); shared by the whole chain")
+                }
+                putJsonObject("cipher") {
+                    put("type", "string"); put("description", "aesgcm (default) | chacha")
+                }
+                putEgressProps(this)
+            },
+            required = listOf("listen_port", "psk"),
+        ),
+    ) { request ->
+        try {
+            val a = request.arguments ?: error("missing arguments")
+            val (egress, egressArg, transport) = parseEgress(a)
+            val cipher = when (a["cipher"]?.jsonPrimitive?.content?.lowercase()) {
+                "chacha", "chachapoly" -> 1
+                else -> 0
+            }
+            val route = controller.addPeer(
+                listenAddr = a["listen_addr"]?.jsonPrimitive?.content ?: "127.0.0.1",
+                listenPort = a["listen_port"]!!.jsonPrimitive.content.toInt(),
+                pskHex = a["psk"]!!.jsonPrimitive.content.trim(),
+                cipher = cipher,
+                egress = egress,
+                egressArg = egressArg,
+                transport = transport,
+            )
+            ok("added peer ${route.id}: ${route.summary()}")
         } catch (t: Throwable) {
             err(t.message ?: t.toString())
         }

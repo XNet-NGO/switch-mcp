@@ -122,7 +122,8 @@ Transport: **Streamable HTTP** (current MCP standard), endpoint
 |------|------|--------|
 | `add_route` | `proto` (tcp/udp), `listen_addr?`, `listen_port`, `target_addr?`, `target_port` | route id + summary |
 | `add_socks` | `listen_addr?`, `listen_port` | socks route id + summary |
-| `add_tunnel` | `server_addr`, `server_port`, `psk`, `target_addr?`, `target_port?`, `cipher?`, `rlisten_addr?`, `rlisten_port?`, `rtarget_addr?`, `rtarget_port?`, `rproto?` | tunnel route id + summary |
+| `add_tunnel` | `server_addr`, `server_port`, `psk`, `target_addr?`, `target_port?`, `cipher?`, `rlisten_addr?`, `rlisten_port?`, `rtarget_addr?`, `rtarget_port?`, `rproto?`, `jumps?`, `jump_hops?`, `jump_target_addr?`, `jump_target_port?`, `jump_proto?` | tunnel route id + summary |
+| `add_peer` | `listen_addr?`, `listen_port`, `psk`, `cipher?` | peer route id + summary |
 | `remove_route` | `id` | ok / not-found |
 | `list_routes` | — | route list |
 | `status` | — | running state, route count, **Network-permission state**, **deployment role** (normal / privileged, §9), **allowAnyTarget** |
@@ -152,6 +153,27 @@ port). Non-loopback reverse targets on the server are gated behind
 `ALLOW_ANY_TARGET` just like forward targets, maintaining the existing safety
 posture.
 
+**Multi-hop jumps (v0.5.0)**: `add_tunnel` can make the client the EDGE
+originator of a jump chain by passing `jumps` (a JSON array of `"addr:port"`
+next-hops) or `jump_hops` (the same list comma-separated). `jumps[0]` MUST
+equal `server_addr:server_port` (the carrier dest); the decrypted OPENJ carries
+the remaining hops plus the final destination
+`jump_target_addr:jump_target_port`, with `jump_proto` (`tcp` default / `udp`)
+as the final leg. A jump chain REQUIRES a reverse listener (`rlisten_port>0`) as
+the local plaintext entry that emits OPENJ. The terminal jump target is a final
+connect, so a non-loopback `jump_target_addr` is gated behind `ALLOW_ANY_TARGET`
+exactly like forward and reverse targets.
+
+`add_peer` registers a relay **PEER** (portmux v0.5.0): a single-port
+peek-demux tunnel server (Noise NoisePSK_NN) that accepts encrypted carriers on
+`listen_port` and either relays an OPENJ multi-hop stream to the next hop or
+connects the terminal target when no hops remain. Peers are the intermediate
+and terminal nodes of a jump chain whose edge is an `add_tunnel` with `jumps`
+set; every node in the chain shares one `psk`/`cipher`. Because a peer forwards
+to arbitrary next hops / terminal targets, it is **gated behind
+`ALLOW_ANY_TARGET`** and is rejected unless that flag is set (§12). The optional
+`egress` pins the peer's onward leg to a chosen network.
+
 ### Safety defaults
 
 - **Loopback targets only** unless explicitly enabled (config flag /
@@ -160,6 +182,10 @@ posture.
 - **SOCKS5 proxy (`add_socks`) requires `ALLOW_ANY_TARGET`.** A SOCKS proxy
   dials arbitrary per-connection destinations, so enabling it implies arbitrary
   egress; it is rejected unless `ALLOW_ANY_TARGET` is set (§12).
+- **Relay peer (`add_peer`) requires `ALLOW_ANY_TARGET`.** A peer forwards to
+  arbitrary next hops / terminal targets, so it is rejected unless
+  `ALLOW_ANY_TARGET` is set (§12). Multi-hop jump targets on `add_tunnel` are
+  gated the same way.
 
 ---
 
@@ -321,7 +347,7 @@ ABIs: arm64-v8a (primary), plus armeabi-v7a / x86_64 / x86 as portmux ships.
 2. Service starts (manually/intent) and the embedded engine loads (native lib
    from the APK, no separate install).
 3. MCP client over Streamable HTTP (via `adb forward`) can `initialize`,
-   `tools/list` (7 tools), `add_route` (loopback), `start`, forward a real TCP
+   `tools/list` (9 tools), `add_route` (loopback), `start`, forward a real TCP
    connection through the embedded engine, and `stop`.
 4. UDP route forwards.
 5. With INTERNET **revoked**, the server does not crash and `status` +
