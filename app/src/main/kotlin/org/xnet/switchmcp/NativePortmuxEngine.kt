@@ -130,7 +130,11 @@ class NativePortmuxEngine(
             "psk must be 64 hex chars (32 bytes)"
         }
         require(serverAddr.isNotBlank()) { "server address required" }
-        if (revListenPort > 0) {
+        // Reverse-FORWARD route (ssh -R style): a reverse listener paired with a
+        // reverse target. A JUMP route (jumpHops set) ALSO uses revListenPort as
+        // its local OPENJ entry but has NO reverse target, so skip the
+        // reverse-target checks in that case (handled in the jump block below).
+        if (revListenPort > 0 && jumpHops.isEmpty()) {
             require(revListenPort in 1..65535) { "reverse listen port $revListenPort out of range" }
             require(revTargetPort in 1..65535) { "reverse target port $revTargetPort out of range" }
             require(revProto in 0..2) { "reverse proto must be 0(TCP), 1(UDP), or 2(BOTH)" }
