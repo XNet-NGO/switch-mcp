@@ -174,7 +174,11 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
             "remote box with no TUN and no root. WARNING: reaching an arbitrary " +
             "off-device server is powerful and REQUIRES the server to have been " +
             "started with ALLOW_ANY_TARGET. The optional egress pins the outbound " +
-            "leg to a chosen network (wifi|cellular|ethernet).",
+            "leg to a chosen network (wifi|cellular|ethernet). REVERSE-FORWARD " +
+            "(v0.4.0): rlisten_port>0 opens a REVERSE LISTENER on the CLIENT " +
+            "(ssh -R style): connections there become client-originated reverse " +
+            "streams the server splices to rtarget_addr:rtarget_port. rproto sets " +
+            "the reverse listener protocol: tcp (default), udp, or both (dual-stack).",
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 putJsonObject("server_addr") {
@@ -197,6 +201,26 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
                     put("type", "string"); put("description", "aesgcm (default) | chacha")
                 }
                 putEgressProps(this)
+                putJsonObject("rlisten_addr") {
+                    put("type", "string")
+                    put("description", "reverse listener address on the client (default 127.0.0.1; v0.4.0)")
+                }
+                putJsonObject("rlisten_port") {
+                    put("type", "integer")
+                    put("description", "reverse listener port on the client (0=none; v0.4.0)")
+                }
+                putJsonObject("rtarget_addr") {
+                    put("type", "string")
+                    put("description", "reverse target address on the server (default 127.0.0.1; v0.4.0)")
+                }
+                putJsonObject("rtarget_port") {
+                    put("type", "integer")
+                    put("description", "reverse target port on the server (required if rlisten_port>0; v0.4.0)")
+                }
+                putJsonObject("rproto") {
+                    put("type", "string")
+                    put("description", "reverse listener protocol: tcp (default), udp, or both (dual-stack; v0.4.0)")
+                }
             },
             required = listOf("server_addr", "server_port", "psk"),
         ),
@@ -206,6 +230,13 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
             val (egress, egressArg, transport) = parseEgress(a)
             val cipher = when (a["cipher"]?.jsonPrimitive?.content?.lowercase()) {
                 "chacha", "chachapoly" -> 1
+                else -> 0
+            }
+            val rlistenPort = a["rlisten_port"]?.jsonPrimitive?.content?.toInt() ?: 0
+            val rtargetPort = a["rtarget_port"]?.jsonPrimitive?.content?.toInt() ?: 0
+            val rproto = when (a["rproto"]?.jsonPrimitive?.content?.lowercase()?.trim()) {
+                "udp" -> 1
+                "both", "tcp+udp", "dual" -> 2
                 else -> 0
             }
             val route = controller.addTunnel(
@@ -218,6 +249,11 @@ fun buildSwitchMcpServer(controller: PortmuxController): Server {
                 egress = egress,
                 egressArg = egressArg,
                 transport = transport,
+                revListenAddr = a["rlisten_addr"]?.jsonPrimitive?.content ?: "127.0.0.1",
+                revListenPort = rlistenPort,
+                revTargetAddr = a["rtarget_addr"]?.jsonPrimitive?.content ?: "127.0.0.1",
+                revTargetPort = rtargetPort,
+                revProto = rproto,
             )
             ok("added tunnel ${route.id}: ${route.summary()}")
         } catch (t: Throwable) {

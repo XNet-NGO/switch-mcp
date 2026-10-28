@@ -11,7 +11,7 @@ plugins {
 // into app/.portmux/ and the .a files extracted to app/.portmux/libs/<abi>/.
 // CMake imports them. If the libs are already present (copied from a sibling
 // checkout / CI cache), the fetch is skipped.
-val portmuxVersion = (project.findProperty("portmuxVersion") as String?) ?: "v0.3.0"
+val portmuxVersion = (project.findProperty("portmuxVersion") as String?) ?: "v0.4.0"
 val portmuxRepo = "XNet-NGO/portmux"
 val portmuxAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
 val portmuxDir = layout.projectDirectory.dir(".portmux")
