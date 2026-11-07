@@ -49,6 +49,10 @@ class McpForegroundService : Service() {
     @Volatile private var port: Int = DEFAULT_PORT
     @Volatile private var serverListening: Boolean = false
 
+    private val prefs by lazy {
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -58,17 +62,63 @@ class McpForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            Log.i(TAG, "stop requested")
-            stopEverything()
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                Log.i(TAG, "stop requested")
+                stopEverything()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                isRunning = false
+                SwitchMcpTileService.requestTileUpdate(applicationContext)
+                return START_NOT_STICKY
+            }
+            ACTION_TOGGLE_ALLOW_ANY_TARGET -> {
+                val ctrl = controller
+                if (ctrl != null) {
+                    val newValue = !ctrl.allowAnyTarget
+                    ctrl.allowAnyTarget = newValue
+                    isAllowAnyTarget = newValue
+                    prefs.edit().putBoolean(KEY_ALLOW_ANY_TARGET, newValue).apply()
+                    Log.i(TAG, "allowAnyTarget toggled to $newValue via notification action")
+                    refreshNotification(ctrl)
+                    SwitchMcpTileService.requestTileUpdate(applicationContext)
+                } else {
+                    Log.w(TAG, "Cannot toggle allowAnyTarget: controller not running")
+                }
+                return START_STICKY
+            }
+            ACTION_SET_ALLOW_ANY_TARGET -> {
+                val targetVal = intent.getBooleanExtra(EXTRA_ALLOW_ANY_TARGET, false)
+                val ctrl = controller
+                if (ctrl != null) {
+                    ctrl.allowAnyTarget = targetVal
+                    isAllowAnyTarget = targetVal
+                    prefs.edit().putBoolean(KEY_ALLOW_ANY_TARGET, targetVal).apply()
+                    Log.i(TAG, "allowAnyTarget set to $targetVal via intent")
+                    refreshNotification(ctrl)
+                    SwitchMcpTileService.requestTileUpdate(applicationContext)
+                }
+                return START_STICKY
+            }
         }
 
-        port = intent?.getIntExtra(EXTRA_PORT, DEFAULT_PORT) ?: DEFAULT_PORT
-        val allowAnyTarget = intent?.getBooleanExtra(EXTRA_ALLOW_ANY_TARGET, false) ?: false
+        port = intent?.getIntExtra(EXTRA_PORT, currentPort) ?: currentPort
+        currentPort = port
 
-        val ctrl = controller ?: PortmuxController(
+        val allowAnyTarget = if (intent?.hasExtra(EXTRA_ALLOW_ANY_TARGET) == true) {
+            val extraVal = intent.getBooleanExtra(EXTRA_ALLOW_ANY_TARGET, false)
+            prefs.edit().putBoolean(KEY_ALLOW_ANY_TARGET, extraVal).apply()
+            extraVal
+        } else {
+            prefs.getBoolean(KEY_ALLOW_ANY_TARGET, false)
+        }
+        isAllowAnyTarget = allowAnyTarget
+        isRunning = true
+        SwitchMcpTileService.requestTileUpdate(applicationContext)
+
+        val ctrl = controller?.also {
+            it.allowAnyTarget = allowAnyTarget
+        } ?: PortmuxController(
             context = applicationContext,
             allowAnyTarget = allowAnyTarget,
         ).also { controller = it }
@@ -180,12 +230,16 @@ class McpForegroundService : Service() {
         }
         teardownServer()
         serverListening = false
+        isRunning = false
+        SwitchMcpTileService.requestTileUpdate(applicationContext)
     }
 
     override fun onDestroy() {
         stopEverything()
         scope?.cancel()
         scope = null
+        isRunning = false
+        SwitchMcpTileService.requestTileUpdate(applicationContext)
         super.onDestroy()
     }
 
@@ -227,10 +281,11 @@ class McpForegroundService : Service() {
 
     private fun buildNotification(ctrl: PortmuxController): Notification {
         val status = ctrl.status()
+        val targetScope = if (ctrl.allowAnyTarget) "Any Target" else "Loopback Only"
         val title = if (status.network.granted) {
-            "switch-mcp running"
+            "switch-mcp · $HOST:$port [$targetScope]"
         } else {
-            "switch-mcp: Network permission denied"
+            "switch-mcp: Network permission denied ($HOST:$port) [$targetScope]"
         }
         val text = buildString {
             append("http://$HOST:$port/mcp")
@@ -238,13 +293,53 @@ class McpForegroundService : Service() {
             append(" · ").append(if (status.running) "forwarding" else "idle")
             append(" · ").append(status.routeCount).append(" route(s)")
             append(" · ").append(status.role.name.lowercase())
+            if (ctrl.allowAnyTarget) {
+                append(" · any-target")
+            }
         }
+
+        val togglePendingIntent = android.app.PendingIntent.getService(
+            this,
+            102,
+            toggleAllowAnyTargetIntent(this),
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        val toggleTitle = if (ctrl.allowAnyTarget) {
+            getString(R.string.action_block_any_target)
+        } else {
+            getString(R.string.action_allow_any_target)
+        }
+        val toggleIconRes = if (ctrl.allowAnyTarget) {
+            android.R.drawable.checkbox_on_background
+        } else {
+            android.R.drawable.checkbox_off_background
+        }
+        val toggleAction = Notification.Action.Builder(
+            android.graphics.drawable.Icon.createWithResource(this, toggleIconRes),
+            toggleTitle,
+            togglePendingIntent,
+        ).build()
+
+        val stopPendingIntent = android.app.PendingIntent.getService(
+            this,
+            101,
+            stopIntent(this),
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        val stopAction = Notification.Action.Builder(
+            android.graphics.drawable.Icon.createWithResource(this, android.R.drawable.ic_media_pause),
+            getString(R.string.action_stop),
+            stopPendingIntent,
+        ).build()
+
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(text)
             .setStyle(Notification.BigTextStyle().bigText(text))
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth) // stock icon; app is iconless
             .setOngoing(true)
+            .addAction(toggleAction)
+            .addAction(stopAction)
             .build()
     }
 
@@ -264,11 +359,22 @@ class McpForegroundService : Service() {
         private const val TAG = "switch-mcp"
         private const val CHANNEL_ID = "switch-mcp"
         private const val NOTIF_ID = 1
+        const val PREFS_NAME = "switch_mcp_prefs"
+        const val KEY_ALLOW_ANY_TARGET = "allow_any_target"
         const val HOST = "127.0.0.1"
         const val DEFAULT_PORT = 3339
 
+        @Volatile var isRunning: Boolean = false
+            private set
+        @Volatile var currentPort: Int = DEFAULT_PORT
+            private set
+        @Volatile var isAllowAnyTarget: Boolean = false
+            private set
+
         const val ACTION_START = "org.xnet.switchmcp.action.START"
         const val ACTION_STOP = "org.xnet.switchmcp.action.STOP"
+        const val ACTION_TOGGLE_ALLOW_ANY_TARGET = "org.xnet.switchmcp.action.TOGGLE_ALLOW_ANY_TARGET"
+        const val ACTION_SET_ALLOW_ANY_TARGET = "org.xnet.switchmcp.action.SET_ALLOW_ANY_TARGET"
         const val EXTRA_PORT = "org.xnet.switchmcp.extra.PORT"
         const val EXTRA_ALLOW_ANY_TARGET = "org.xnet.switchmcp.extra.ALLOW_ANY_TARGET"
 
@@ -281,5 +387,14 @@ class McpForegroundService : Service() {
 
         fun stopIntent(context: Context): Intent =
             Intent(context, McpForegroundService::class.java).apply { action = ACTION_STOP }
+
+        fun toggleAllowAnyTargetIntent(context: Context): Intent =
+            Intent(context, McpForegroundService::class.java).apply { action = ACTION_TOGGLE_ALLOW_ANY_TARGET }
+
+        fun setAllowAnyTargetIntent(context: Context, allow: Boolean): Intent =
+            Intent(context, McpForegroundService::class.java).apply {
+                action = ACTION_SET_ALLOW_ANY_TARGET
+                putExtra(EXTRA_ALLOW_ANY_TARGET, allow)
+            }
     }
 }
