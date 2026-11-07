@@ -22,9 +22,13 @@ class PortmuxController(
     @Volatile
     var allowAnyTarget: Boolean = allowAnyTarget
         set(value) {
+            val previous = field
             field = value
             engine.allowNonLoopbackTargets = value
             Log.i(TAG, "allowAnyTarget set to: $value")
+            if (previous && !value) {
+                evictNonLoopbackRoutes()
+            }
         }
 
     private val engine: PortmuxEngine =
@@ -216,6 +220,26 @@ class PortmuxController(
     )
 
     fun networkState(): NetworkGuard.State = networkGuard.state()
+
+    private fun evictNonLoopbackRoutes() {
+        val routes = engine.listRoutes()
+        for (r in routes) {
+            val nonLoopback = when {
+                r.isSocks -> true
+                r.isPeer -> false
+                r.isTunnel -> {
+                    !isLoopback(r.targetAddr) ||
+                        (r.revListenPort > 0 && r.jumpHops.isEmpty() && !isLoopback(r.revTargetAddr)) ||
+                        (r.jumpHops.isNotEmpty() && !isLoopback(r.jumpTargetAddr))
+                }
+                else -> !isLoopback(r.targetAddr)
+            }
+            if (nonLoopback) {
+                Log.i(TAG, "evicting non-loopback route ${r.id} (${r.summary()}) due to ALLOW_ANY_TARGET disable")
+                engine.removeRoute(r.id)
+            }
+        }
+    }
 
     private fun isLoopback(addr: String): Boolean =
         addr.isBlank() || addr == "127.0.0.1" || addr == "::1" || addr == "localhost"
