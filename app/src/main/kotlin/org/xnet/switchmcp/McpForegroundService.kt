@@ -49,6 +49,8 @@ class McpForegroundService : Service() {
     @Volatile private var port: Int = DEFAULT_PORT
     @Volatile private var serverListening: Boolean = false
 
+    private val toggleLock = Any()
+
     private val prefs by lazy {
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
@@ -73,29 +75,30 @@ class McpForegroundService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_TOGGLE_ALLOW_ANY_TARGET -> {
-                val ctrl = controller
-                if (ctrl != null) {
-                    val newValue = !ctrl.allowAnyTarget
-                    ctrl.allowAnyTarget = newValue
-                    isAllowAnyTarget = newValue
+                synchronized(toggleLock) {
+                    val current = controller?.allowAnyTarget ?: prefs.getBoolean(KEY_ALLOW_ANY_TARGET, false)
+                    val newValue = !current
                     prefs.edit().putBoolean(KEY_ALLOW_ANY_TARGET, newValue).apply()
+                    isAllowAnyTarget = newValue
+                    controller?.let { ctrl ->
+                        ctrl.allowAnyTarget = newValue
+                        refreshNotification(ctrl)
+                    }
                     Log.i(TAG, "allowAnyTarget toggled to $newValue via notification action")
-                    refreshNotification(ctrl)
                     SwitchMcpTileService.requestTileUpdate(applicationContext)
-                } else {
-                    Log.w(TAG, "Cannot toggle allowAnyTarget: controller not running")
                 }
                 return START_STICKY
             }
             ACTION_SET_ALLOW_ANY_TARGET -> {
-                val targetVal = intent.getBooleanExtra(EXTRA_ALLOW_ANY_TARGET, false)
-                val ctrl = controller
-                if (ctrl != null) {
-                    ctrl.allowAnyTarget = targetVal
-                    isAllowAnyTarget = targetVal
+                synchronized(toggleLock) {
+                    val targetVal = intent.getBooleanExtra(EXTRA_ALLOW_ANY_TARGET, false)
                     prefs.edit().putBoolean(KEY_ALLOW_ANY_TARGET, targetVal).apply()
+                    isAllowAnyTarget = targetVal
+                    controller?.let { ctrl ->
+                        ctrl.allowAnyTarget = targetVal
+                        refreshNotification(ctrl)
+                    }
                     Log.i(TAG, "allowAnyTarget set to $targetVal via intent")
-                    refreshNotification(ctrl)
                     SwitchMcpTileService.requestTileUpdate(applicationContext)
                 }
                 return START_STICKY
