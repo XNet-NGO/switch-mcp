@@ -17,8 +17,16 @@ import android.util.Log
  */
 class PortmuxController(
     private val context: Context,
-    val allowAnyTarget: Boolean = false,
+    allowAnyTarget: Boolean = false,
 ) {
+    @Volatile
+    var allowAnyTarget: Boolean = allowAnyTarget
+        set(value) {
+            field = value
+            engine.allowNonLoopbackTargets = value
+            Log.i(TAG, "allowAnyTarget set to: $value")
+        }
+
     private val engine: PortmuxEngine =
         NativePortmuxEngine(context = context, allowNonLoopbackTargets = allowAnyTarget)
     private val networkGuard = NetworkGuard(context)
@@ -219,8 +227,12 @@ class PortmuxController(
         return try {
             context.checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED
         } catch (t: Throwable) {
-            Log.w("switch-mcp", "ACCESS_LOCAL_NETWORK check failed: ${t.message}")
+            Log.w(TAG, "ACCESS_LOCAL_NETWORK check failed: ${t.message}")
             false
         }
+    }
+
+    companion object {
+        private const val TAG = "switch-mcp"
     }
 }

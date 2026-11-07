@@ -27,7 +27,7 @@ import kotlin.concurrent.withLock
  */
 class NativePortmuxEngine(
     private val context: Context? = null,
-    private val allowNonLoopbackTargets: Boolean = false,
+    @Volatile override var allowNonLoopbackTargets: Boolean = false,
 ) : PortmuxEngine {
 
     private val lock = ReentrantLock()

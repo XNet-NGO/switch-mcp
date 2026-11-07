@@ -107,6 +107,9 @@ data class Route(
  * is identical.
  */
 interface PortmuxEngine {
+    /** Whether non-loopback targets are permitted (ALLOW_ANY_TARGET gate). */
+    var allowNonLoopbackTargets: Boolean
+
     /** Add a route; returns it. Throws on validation/engine error. */
     fun addRoute(
         proto: Proto,

@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">switch-mcp</string>
+    <string name="tile_label">switch-mcp</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_start">Start</string>
+    <string name="action_allow_any_target">Allow Any Target</string>
+    <string name="action_block_any_target">Block Any Target</string>
 </resources>
